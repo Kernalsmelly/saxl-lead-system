@@ -1,0 +1,15 @@
+{
+  "name": "Jordan Alvarez",
+  "phone": "503-555-0142",
+  "email": "jordan.alvarez@example.com",
+  "service": "junk_removal",
+  "message": "Hi — I have an old sectional couch, a box spring, and about six contractor bags of yard debris in my backyard that I need hauled. Side gate access. Prefer a Saturday if possible. Thanks!",
+  "city": "Portland",
+  "zip": "97214",
+  "address": "2814 SE Hawthorne Blvd",
+  "preferred_date": "2026-05-02",
+  "photos": [
+    "https://uploads.example.com/trashx/quote/a1b2c3/couch.jpg",
+    "https://uploads.example.com/trashx/quote/a1b2c3/yard-debris.jpg"
+  ]
+}
