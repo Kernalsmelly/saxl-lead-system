@@ -1,22 +1,8 @@
-import { createClient } from '@/lib/supabase/server';
+import { redirect } from 'next/navigation';
 
-export default async function AppHome() {
-  const supabase = createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Leads</h1>
-        <p className="text-sm text-muted-foreground">
-          Signed in as {user?.email}.
-        </p>
-      </div>
-      <div className="rounded-md border border-dashed p-12 text-center text-sm text-muted-foreground">
-        Lead capture not wired up yet. Next up: website-form webhook.
-      </div>
-    </div>
-  );
+// /app is a thin redirect to the leads index — that's the dashboard
+// home for now. When more sections land (settings, billing, etc.)
+// we'll either keep this redirect or build a real overview here.
+export default function AppHome() {
+  redirect('/app/leads');
 }

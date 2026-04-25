@@ -115,11 +115,13 @@ export async function POST(
 
   // 6. Insert lead (raw_payload preserves the full original input —
   // including keys not mapped to columns, e.g. photos).
+  // raw_payload is typed as Json by the generated Database types; we
+  // already know rawJson came from JSON.parse, so the cast is safe.
   const leadInsert = {
     tenant_id: tenantId,
     source: 'website_form' as const,
     status: 'new' as const,
-    raw_payload: rawJson as object,
+    raw_payload: rawJson as import('@/lib/db/types').Json,
     ...mapPayloadToLeadColumns(parsed.data),
   };
 

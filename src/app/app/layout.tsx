@@ -24,7 +24,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               Saxl
             </Link>
             <nav className="flex items-center gap-4 text-sm text-muted-foreground">
-              <Link href="/app" className="hover:text-foreground">
+              <Link href="/app/leads" className="hover:text-foreground">
                 Leads
               </Link>
               <Link href="/app/settings" className="hover:text-foreground">
