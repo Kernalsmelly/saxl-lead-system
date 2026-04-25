@@ -21,7 +21,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
           <div className="flex items-center gap-6">
             <Link href="/app" className="text-sm font-semibold tracking-tight">
-              Saxl
+              Saxl Labs
             </Link>
             <nav className="flex items-center gap-4 text-sm text-muted-foreground">
               <Link href="/app/leads" className="hover:text-foreground">

@@ -3,8 +3,11 @@ import { notFound } from 'next/navigation';
 import { format, formatDistanceToNow } from 'date-fns';
 
 import { createClient } from '@/lib/supabase/server';
+import { formatEnum } from '@/lib/format';
+import { StatusForm } from './status-form';
 
-// Lead detail. Server-rendered, read-only.
+// Lead detail. Server-rendered, with a single editable control
+// (status) wired up via a server action.
 //
 // RLS scopes both queries to the authenticated user's tenant. If the
 // lead id belongs to another tenant (or doesn't exist), maybeSingle()
@@ -64,7 +67,7 @@ export default async function LeadDetailPage({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-baseline justify-between gap-4">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <Link
             href="/app/leads"
@@ -80,12 +83,14 @@ export default async function LeadDetailPage({
             <time dateTime={lead.received_at} title={new Date(lead.received_at).toLocaleString()}>
               {formatDistanceToNow(new Date(lead.received_at), { addSuffix: true })}
             </time>{' '}
-            via {lead.source.replace(/_/g, ' ')}
+            via {formatEnum(lead.source)}
           </p>
         </div>
-        <span className="inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium capitalize">
-          {lead.status.replace(/_/g, ' ')}
-        </span>
+        <StatusForm
+          leadId={lead.id}
+          currentStatus={lead.status}
+          lastUpdatedAt={lead.last_updated_at}
+        />
       </div>
 
       <div className="grid gap-6 md:grid-cols-3">
@@ -98,7 +103,7 @@ export default async function LeadDetailPage({
           </Section>
 
           <Section title="Job">
-            <Field label="Service" value={lead.service_type} />
+            <Field label="Service" value={formatEnum(lead.service_type)} />
             <Field
               label="Preferred date"
               value={lead.preferred_date ? format(new Date(lead.preferred_date), 'PPP') : null}
@@ -138,9 +143,8 @@ export default async function LeadDetailPage({
                   key={event.id}
                   className="rounded-md border bg-card p-3 text-sm shadow-sm"
                 >
-                  <div className="font-medium capitalize">
-                    {event.event_type.replace(/_/g, ' ')}
-                  </div>
+                  <div className="font-medium">{formatEnum(event.event_type)}</div>
+                  <EventDetail event={event} />
                   <div className="mt-0.5 text-xs text-muted-foreground">
                     <time
                       dateTime={event.created_at}
@@ -179,4 +183,22 @@ function Field({ label, value }: { label: string; value: string | null | undefin
       </dd>
     </div>
   );
+}
+
+function EventDetail({
+  event,
+}: {
+  event: { event_type: string; payload: unknown };
+}) {
+  if (event.event_type === 'status_changed' && event.payload && typeof event.payload === 'object') {
+    const p = event.payload as { from?: unknown; to?: unknown };
+    if (typeof p.from === 'string' && typeof p.to === 'string') {
+      return (
+        <div className="text-xs text-muted-foreground">
+          {formatEnum(p.from)} → {formatEnum(p.to)}
+        </div>
+      );
+    }
+  }
+  return null;
 }

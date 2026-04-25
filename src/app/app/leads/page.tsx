@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 
 import { createClient } from '@/lib/supabase/server';
+import { formatEnum } from '@/lib/format';
 import {
   Table,
   TableBody,
@@ -96,7 +97,11 @@ export default async function LeadsIndexPage() {
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
                   <Link href={`/app/leads/${lead.id}`} className="block">
-                    {lead.service_type ?? <span className="text-muted-foreground">—</span>}
+                    {lead.service_type ? (
+                      formatEnum(lead.service_type)
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </Link>
                 </TableCell>
                 <TableCell>
@@ -135,16 +140,16 @@ function Header({ count }: { count?: number }) {
 
 function StatusBadge({ status }: { status: string }) {
   return (
-    <span className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium capitalize">
-      {status.replace(/_/g, ' ')}
+    <span className="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium">
+      {formatEnum(status)}
     </span>
   );
 }
 
 function SourceBadge({ source }: { source: string }) {
   return (
-    <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs capitalize text-muted-foreground">
-      {source.replace(/_/g, ' ')}
+    <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+      {formatEnum(source)}
     </span>
   );
 }
