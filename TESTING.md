@@ -182,3 +182,147 @@ inbox you own and re-fire the webhook. Confirm the email lands within
 - After any change to the webhook handler's notification path.
 - After rotating the Resend API key or moving Resend domains.
 - Before each release that ships notification-email changes.
+
+---
+
+## Follow-up cron: backdated lead end-to-end
+
+**Why it matters**
+
+The cron at `/api/cron/process-follow-ups` runs every 15 minutes on
+Vercel and fires reminder emails for leads that have gone stale. We
+want to manually verify the full path — schedule → due date passes →
+cron picks it up → email sends → row marked `sent` → audit event
+logged — without waiting 48 hours.
+
+The trick is to backdate `received_at` and `due_at` so the row is
+already "due" the moment it lands.
+
+**Setup (one-time per dev environment)**
+
+1. Generate a cron secret if you don't have one yet:
+   ```
+   openssl rand -hex 32
+   ```
+2. Put it in `.env.local`:
+   ```
+   CRON_SECRET=<the random hex>
+   ```
+3. Restart `pnpm dev`.
+
+**Backdated test — full happy path**
+
+1. Fire a normal signed webhook to capture a fresh lead:
+   ```
+   pnpm sign-webhook \
+     --secret <tenant_channels.config.webhook_secret> \
+     --url http://localhost:3000/api/webhooks/website-form/<tenant_uuid> \
+     --payload-file scripts/sample-payload.json
+   ```
+   Note the returned `lead_id`.
+
+2. Confirm two follow-ups were scheduled. In the SQL editor:
+   ```sql
+   select id, type, status, due_at
+   from public.follow_ups
+   where lead_id = '<lead_id>'
+   order by due_at;
+   ```
+   Expect two rows: `48h_response` (due_at ≈ now + 48h) and
+   `14d_cold_check` (due_at ≈ now + 14d), both `pending`.
+
+3. Backdate the 48h row so it's already due:
+   ```sql
+   update public.follow_ups
+     set due_at = now() - interval '1 minute'
+     where lead_id = '<lead_id>'
+       and type = '48h_response';
+   ```
+   (Also backdate the lead's `received_at` if you want the email copy
+   to read accurately; not required for the cron logic.)
+
+4. Trigger the cron manually (substitute your `CRON_SECRET`):
+   ```
+   curl "http://localhost:3000/api/cron/process-follow-ups?secret=<CRON_SECRET>"
+   ```
+   Expected JSON: `{ processed: 1, sent: 1, cancelled: 0, errors: 0, details: [...] }`.
+
+5. **Expected results:**
+   - Email lands in your inbox with subject like
+     `Heads up — Jordan Alvarez reached out 48 hours ago`.
+   - In SQL:
+     ```sql
+     select status, sent_at from public.follow_ups
+       where lead_id = '<lead_id>' and type = '48h_response';
+     ```
+     Status flipped to `sent`, `sent_at` is populated.
+   - Lead detail page Activity column shows a **Follow Up Sent**
+     event below **Captured** and **Owner Notified**.
+
+**Lazy-cancel path — status moved before due**
+
+The cron's job is to cancel reminders that are no longer applicable
+without sending them. Verify:
+
+1. Capture a fresh lead (as above). Note the `lead_id`.
+2. In the dashboard, change the status from **New** to **Contacted**.
+3. Backdate the 48h follow-up:
+   ```sql
+   update public.follow_ups
+     set due_at = now() - interval '1 minute'
+     where lead_id = '<lead_id>' and type = '48h_response';
+   ```
+4. Trigger the cron with the curl above.
+5. **Expected:** response shows `cancelled: 1, sent: 0`. No email.
+   The follow_up row is now `cancelled`. No `follow_up_sent` event in
+   the activity log (audit log is for things that happened).
+
+**Cancel-on-terminal path**
+
+1. Capture a lead. Confirm two pending follow-ups exist.
+2. In the dashboard, change status to **Won** (or Lost / Cold).
+3. Re-query `follow_ups` for that lead — both rows should be
+   `cancelled`. No cron run needed; the status action did it.
+
+**Cancel-and-replace on re-quote**
+
+1. Capture a lead. Move it to **Quoted** in the dashboard.
+2. Confirm a `7d_quote_followup` row exists, status `pending`.
+3. Move status back to **Contacted**, then back to **Quoted**.
+4. Re-query `follow_ups`:
+   ```sql
+   select type, status, due_at, created_at
+   from public.follow_ups
+   where lead_id = '<lead_id>' and type = '7d_quote_followup'
+   order by created_at;
+   ```
+   Two rows: the first `cancelled`, the second `pending` with a
+   newer `due_at`. Exactly one row should ever be `pending`.
+
+**Auth check**
+
+Calling the cron without a secret should 401:
+```
+curl -i http://localhost:3000/api/cron/process-follow-ups
+# expect: HTTP/1.1 401 Unauthorized
+```
+
+**Failure modes**
+
+- **`error_send_failed` in the response details:** Resend rejected the
+  send. Same triage as the new-lead notification (domain verification,
+  from-address, etc.). Row stays `pending` so the next 15-min tick
+  retries automatically.
+- **`processed: 0` when you expect rows:** the rows aren't `pending`,
+  or `due_at` isn't ≤ now. Check the SQL.
+- **`cancelled_lead_not_found`:** the FK `ON DELETE CASCADE` should
+  prevent this; if it shows up, something deleted a lead row out from
+  under us. Investigate.
+
+**When to re-run this test**
+
+- After any change to `src/lib/follow-ups/**` or
+  `src/lib/notifications/follow-up-emails.ts`.
+- After any change to the cron route or `vercel.json` schedule.
+- Before each release that touches follow-up scheduling or email
+  delivery.

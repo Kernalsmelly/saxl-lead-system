@@ -3,6 +3,10 @@
 import { revalidatePath } from 'next/cache';
 
 import { createClient } from '@/lib/supabase/server';
+import {
+  cancelAllPendingFollowUps,
+  scheduleQuoteFollowUp,
+} from '@/lib/follow-ups/scheduling';
 import type { Database } from '@/lib/db/types';
 
 type LeadStatus = Database['public']['Enums']['lead_status'];
@@ -120,7 +124,19 @@ export async function updateLeadStatus(
     );
   }
 
-  // 6. Revalidate.
+  // 6. Reactive follow-up scheduling.
+  //   - quoted        -> cancel-and-replace 7d_quote_followup
+  //   - won/lost/cold -> cancel ALL pending follow-ups (terminal status)
+  // Other transitions (e.g. new -> contacted) are handled lazily by the
+  // cron processor's pre-flight check; we don't need to mutate the
+  // follow_ups table on every step. Helpers log but never throw.
+  if (newStatus === 'quoted') {
+    await scheduleQuoteFollowUp(supabase, { leadId });
+  } else if (newStatus === 'won' || newStatus === 'lost' || newStatus === 'cold') {
+    await cancelAllPendingFollowUps(supabase, { leadId });
+  }
+
+  // 7. Revalidate.
   revalidatePath(`/app/leads/${leadId}`);
   revalidatePath('/app/leads');
 

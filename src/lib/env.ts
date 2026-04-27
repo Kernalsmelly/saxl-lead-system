@@ -10,6 +10,7 @@ const serverEnvSchema = z.object({
   APP_BASE_URL: z.string().url(),
   RESEND_API_KEY: z.string().min(1),
   NOTIFICATIONS_FROM_EMAIL: z.string().email(),
+  CRON_SECRET: z.string().min(16),
 });
 
 const clientEnvSchema = serverEnvSchema.pick({
@@ -28,6 +29,7 @@ const source = {
   APP_BASE_URL: process.env.APP_BASE_URL,
   RESEND_API_KEY: process.env.RESEND_API_KEY,
   NOTIFICATIONS_FROM_EMAIL: process.env.NOTIFICATIONS_FROM_EMAIL,
+  CRON_SECRET: process.env.CRON_SECRET,
 };
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
