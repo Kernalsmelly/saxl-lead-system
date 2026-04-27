@@ -1,10 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { waitUntil } from '@vercel/functions';
+
 import { createServiceClient } from '@/lib/supabase/service';
 import { verifySignature } from '@/lib/webhooks/signature';
 import {
   mapPayloadToLeadColumns,
   websiteFormPayloadSchema,
 } from '@/lib/webhooks/lead-mapping';
+import { sendNewLeadNotification } from '@/lib/notifications/email';
 
 // Inbound website-form webhook.
 //
@@ -43,7 +46,7 @@ export async function POST(
 
   const { data: tenant, error: tenantErr } = await supabase
     .from('tenants')
-    .select('id')
+    .select('id, name, owner_user_id')
     .eq('id', tenantId)
     .maybeSingle();
   if (tenantErr) {
@@ -128,7 +131,7 @@ export async function POST(
   const { data: lead, error: insertErr } = await supabase
     .from('leads')
     .insert(leadInsert)
-    .select('id')
+    .select('id, name, phone, email, service_type, city, source')
     .single();
   if (insertErr || !lead) {
     console.error('[webhook/website-form] lead insert failed', insertErr);
@@ -150,7 +153,100 @@ export async function POST(
     );
   }
 
+  // 8. Owner notification — fire-and-forget.
+  // Lead capture is the critical path; the email is a nice-to-have.
+  // We do NOT await the send before returning 200, so a slow/down
+  // Resend never delays the prospect's form response. waitUntil()
+  // declares the work as part of the request lifecycle so on Vercel
+  // the function isn't suspended before the send completes — locally
+  // (Node) it's effectively a no-op.
+  //
+  // Both success and failure are written to lead_events as
+  // 'owner_notified' so we have an audit trail when Resend is
+  // degraded.
+  waitUntil(
+    notifyOwner({
+      tenantId,
+      tenantName: tenant.name,
+      ownerUserId: tenant.owner_user_id,
+      lead,
+    }),
+  );
+
   return json({ lead_id: lead.id }, 200);
+}
+
+/**
+ * Resolve the owner email, send the notification, and log a
+ * lead_events row reflecting the outcome. Never throws — all
+ * errors land as { success: false, error } and get persisted.
+ */
+async function notifyOwner(args: {
+  tenantId: string;
+  tenantName: string;
+  ownerUserId: string;
+  lead: {
+    id: string;
+    name: string | null;
+    phone: string | null;
+    email: string | null;
+    service_type: string | null;
+    city: string | null;
+    source: string;
+  };
+}): Promise<void> {
+  const supabase = createServiceClient();
+
+  let result: { success: boolean; error?: string };
+
+  try {
+    // Resolve owner email via the auth admin API. The tenants table
+    // doesn't store the email — owner_user_id is the only link to
+    // auth.users, so identity = notification address by default.
+    const { data: userRes, error: userErr } = await supabase.auth.admin.getUserById(
+      args.ownerUserId,
+    );
+    if (userErr) throw new Error(`auth.admin.getUserById: ${userErr.message}`);
+    const ownerEmail = userRes.user?.email;
+    if (!ownerEmail) throw new Error('owner has no email on auth record');
+
+    const sendResult = await sendNewLeadNotification({
+      to: ownerEmail,
+      tenantName: args.tenantName,
+      lead: args.lead,
+    });
+    result = sendResult.success
+      ? { success: true }
+      : { success: false, error: sendResult.error };
+  } catch (err) {
+    result = {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  if (!result.success) {
+    console.error('[webhook/website-form] owner notification failed', {
+      leadId: args.lead.id,
+      tenantId: args.tenantId,
+      error: result.error,
+    });
+  }
+
+  const { error: evtErr } = await supabase.from('lead_events').insert({
+    lead_id: args.lead.id,
+    event_type: 'owner_notified',
+    payload: {
+      success: result.success,
+      error: result.error ?? null,
+    },
+  });
+  if (evtErr) {
+    console.error(
+      '[webhook/website-form] owner_notified event insert failed',
+      { leadId: args.lead.id, err: evtErr },
+    );
+  }
 }
 
 function json(body: unknown, status: number) {

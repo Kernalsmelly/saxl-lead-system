@@ -7,6 +7,9 @@ const serverEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().min(1),
   SUPABASE_SECRET_KEY: z.string().min(1),
   NEXT_PUBLIC_APP_URL: z.string().url(),
+  APP_BASE_URL: z.string().url(),
+  RESEND_API_KEY: z.string().min(1),
+  NOTIFICATIONS_FROM_EMAIL: z.string().email(),
 });
 
 const clientEnvSchema = serverEnvSchema.pick({
@@ -22,6 +25,9 @@ const source = {
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
   SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY,
   NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  APP_BASE_URL: process.env.APP_BASE_URL,
+  RESEND_API_KEY: process.env.RESEND_API_KEY,
+  NOTIFICATIONS_FROM_EMAIL: process.env.NOTIFICATIONS_FROM_EMAIL,
 };
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
