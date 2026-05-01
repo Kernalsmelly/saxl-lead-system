@@ -9,6 +9,7 @@ import {
 } from '@/lib/webhooks/lead-mapping';
 import { sendNewLeadNotification } from '@/lib/notifications/email';
 import { scheduleFollowUpsOnLeadCreate } from '@/lib/follow-ups/scheduling';
+import { parseLead } from '@/lib/parsing/lead-parser';
 
 // Inbound website-form webhook.
 //
@@ -185,6 +186,21 @@ export async function POST(
     }),
   );
 
+  // 10. AI parsing & enrichment — fire-and-forget, parallel with the
+  // owner notification. Runs the unstructured `message` text through
+  // Claude, fills in any null columns the form left blank, and logs an
+  // 'ai_parsed' lead_event with the outcome. Skipped if the form
+  // didn't include a message (no unstructured text to parse).
+  const messageText = parsed.data.message ?? null;
+  if (messageText) {
+    waitUntil(
+      parseAndEnrichLead({
+        leadId: lead.id,
+        rawText: messageText,
+      }),
+    );
+  }
+
   return json({ lead_id: lead.id }, 200);
 }
 
@@ -258,6 +274,139 @@ async function notifyOwner(args: {
       '[webhook/website-form] owner_notified event insert failed',
       { leadId: args.lead.id, err: evtErr },
     );
+  }
+}
+
+/**
+ * Run the AI parser over a lead's unstructured message text, patch
+ * null columns with whatever it extracted, and log an `ai_parsed`
+ * lead_event with the outcome. Never throws.
+ *
+ * Patch rules (locked Day 7):
+ *   - Structured fields (name, phone, email, service_type, city, zip,
+ *     address, preferred_date): only patch when the existing column
+ *     value is null AND the parsed value is non-null. Don't overwrite
+ *     explicit form input with AI guesses.
+ *   - notes: overwrite only when parsed.notes is non-empty AND
+ *     parsed_confidence >= 0.5. The form's notes is just a copy of
+ *     raw_payload.message, so we can safely upgrade it to the AI
+ *     summary at the threshold; below the threshold, keep the raw
+ *     message rather than risk the AI silently degrading signal.
+ *   - parsed_confidence: always patch with the parsed value (or null
+ *     if the parse failed) so the column reflects the most recent
+ *     attempt.
+ */
+async function parseAndEnrichLead(args: {
+  leadId: string;
+  rawText: string;
+}): Promise<void> {
+  const supabase = createServiceClient();
+
+  const result = await parseLead({ rawText: args.rawText, channelHint: 'website_form' });
+
+  // On parse failure: still log the attempt; clear parsed_confidence
+  // so the dashboard doesn't show a stale value from a prior attempt.
+  if (!result.success) {
+    console.error('[webhook/website-form] AI parse failed', {
+      leadId: args.leadId,
+      error: result.error,
+    });
+    await supabase.from('leads').update({ parsed_confidence: null }).eq('id', args.leadId);
+    const { error: evtErr } = await supabase.from('lead_events').insert({
+      lead_id: args.leadId,
+      event_type: 'ai_parsed',
+      payload: {
+        success: false,
+        error: result.error,
+        fields_updated: [],
+      },
+    });
+    if (evtErr) {
+      console.error('[webhook/website-form] ai_parsed event insert failed', {
+        leadId: args.leadId,
+        err: evtErr,
+      });
+    }
+    return;
+  }
+
+  // Read current row so we know which columns are null.
+  const { data: current, error: readErr } = await supabase
+    .from('leads')
+    .select(
+      'name, phone, email, service_type, city, zip, address, preferred_date, notes',
+    )
+    .eq('id', args.leadId)
+    .maybeSingle();
+
+  if (readErr || !current) {
+    console.error('[webhook/website-form] AI enrich read failed', {
+      leadId: args.leadId,
+      error: readErr,
+    });
+    return;
+  }
+
+  const { parsed } = result;
+  // Use the generated TablesUpdate shape so the column names + value
+  // types are checked at compile time.
+  const patch: import('@/lib/db/types').Database['public']['Tables']['leads']['Update'] = {};
+  const fieldsUpdated: string[] = [];
+
+  // Structured fields: fill nulls only.
+  const fillIfNull = (
+    key: 'name' | 'phone' | 'email' | 'service_type' | 'city' | 'zip' | 'address' | 'preferred_date',
+  ) => {
+    if (current[key] === null && parsed[key] !== null) {
+      patch[key] = parsed[key];
+      fieldsUpdated.push(key);
+    }
+  };
+  fillIfNull('name');
+  fillIfNull('phone');
+  fillIfNull('email');
+  fillIfNull('service_type');
+  fillIfNull('city');
+  fillIfNull('zip');
+  fillIfNull('address');
+  fillIfNull('preferred_date');
+
+  // notes: overwrite if confident enough.
+  if (parsed.notes && parsed.parsed_confidence >= 0.5) {
+    patch.notes = parsed.notes;
+    fieldsUpdated.push('notes');
+  }
+
+  // Always update parsed_confidence to reflect the latest attempt.
+  patch.parsed_confidence = parsed.parsed_confidence;
+
+  const { error: updateErr } = await supabase
+    .from('leads')
+    .update(patch)
+    .eq('id', args.leadId);
+  if (updateErr) {
+    console.error('[webhook/website-form] AI enrich update failed', {
+      leadId: args.leadId,
+      error: updateErr,
+    });
+    // Continue to log the event anyway so the audit trail captures
+    // that we tried.
+  }
+
+  const { error: evtErr } = await supabase.from('lead_events').insert({
+    lead_id: args.leadId,
+    event_type: 'ai_parsed',
+    payload: {
+      success: true,
+      parsed_confidence: parsed.parsed_confidence,
+      fields_updated: fieldsUpdated,
+    },
+  });
+  if (evtErr) {
+    console.error('[webhook/website-form] ai_parsed event insert failed', {
+      leadId: args.leadId,
+      err: evtErr,
+    });
   }
 }
 

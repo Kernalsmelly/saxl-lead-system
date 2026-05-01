@@ -326,3 +326,142 @@ curl -i http://localhost:3000/api/cron/process-follow-ups
 - After any change to the cron route or `vercel.json` schedule.
 - Before each release that touches follow-up scheduling or email
   delivery.
+
+---
+
+## AI lead parsing: end-to-end enrichment from a vague payload
+
+**Why it matters**
+
+The website-form webhook fires the AI parsing layer on every captured
+lead's `message` text. The parser extracts structured fields (city,
+zip, address, preferred_date, service_type) and a brief intent summary.
+It writes back to the lead row with two rules:
+
+- **Structured fields:** only patched when the existing column was
+  null. We don't overwrite an explicit form value with an AI guess.
+- **`notes`:** overwritten only when `parsed_confidence >= 0.5` AND
+  the AI returned a non-empty summary. Below that threshold we keep
+  the raw form message.
+
+The parse outcome — success, fields_updated, confidence, or error —
+is logged as a `lead_events` row of type `ai_parsed`.
+
+**Setup (one-time per dev environment)**
+
+1. Get an Anthropic API key from https://console.anthropic.com/settings/keys.
+2. Add to `.env.local`:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+3. Restart `pnpm dev`.
+
+**Manual test — vague payload, expect enrichment**
+
+Use a payload where most form fields are blank but the message text
+is rich. Save as `scripts/sample-payload-vague.json`:
+
+```json
+{
+  "name": "Marisol Ortega",
+  "phone": "503-555-0188",
+  "email": "",
+  "service": "",
+  "message": "Hey there! I just bought a house at 4421 NE Killingsworth in Portland 97218 and the previous owner left a TON of stuff in the garage — old paint cans, a broken fridge, two dressers, and a pile of plywood scraps. Would love to get it all hauled away on Saturday May 9th if you can swing it. Thanks!",
+  "city": "",
+  "zip": "",
+  "address": "",
+  "preferred_date": "",
+  "photos": []
+}
+```
+
+Fire the webhook:
+```
+pnpm sign-webhook \
+  --secret <tenant_channels.config.webhook_secret> \
+  --url http://localhost:3000/api/webhooks/website-form/<tenant_uuid> \
+  --payload-file scripts/sample-payload-vague.json
+```
+
+Note the returned `lead_id`. Wait ~5 seconds (the parse runs
+fire-and-forget), then check Supabase SQL editor:
+
+```sql
+select name, phone, email, service_type, city, zip, address,
+       preferred_date, notes, parsed_confidence
+from public.leads
+where id = '<lead_id>';
+```
+
+**Expected:** the AI fills in `city = 'Portland'`, `zip = '97218'`,
+`address ≈ '4421 NE Killingsworth'`, `service_type = 'junk_removal'`,
+`preferred_date = '2026-05-09'`, and `notes` with a 1-2 sentence
+summary like *"Wants junk removal: paint cans, broken fridge, two
+dressers, plywood scraps from a recent home purchase."* `parsed_confidence`
+should be ≥0.7.
+
+Then check the audit log:
+```sql
+select event_type, payload, created_at
+from public.lead_events
+where lead_id = '<lead_id>'
+order by created_at;
+```
+
+**Expected:** `captured`, `owner_notified`, `ai_parsed`. The
+`ai_parsed` payload should be:
+```json
+{
+  "success": true,
+  "parsed_confidence": 0.87,
+  "fields_updated": ["email", "service_type", "city", "zip", "address", "preferred_date", "notes"]
+}
+```
+
+(Exact `fields_updated` depends on what the form provided vs what
+the AI filled in.)
+
+Open the lead in the dashboard. The Activity column shows three
+events: **Captured**, **Owner Notified**, **Ai Parsed**.
+
+**Test the don't-overwrite rule**
+
+Use the original `scripts/sample-payload.json` (Jordan Alvarez) where
+all form fields are filled in. After the webhook fires:
+
+```sql
+select name, phone, city, zip, address, preferred_date, notes, parsed_confidence
+from public.leads
+where id = '<jordan_lead_id>';
+```
+
+**Expected:** `name`, `phone`, `city`, `zip`, `address`,
+`preferred_date` keep their form values verbatim. `notes` may have
+been replaced by the AI summary IF `parsed_confidence >= 0.5`;
+otherwise it's still the raw message text. `parsed_confidence` is
+populated.
+
+The `ai_parsed` event's `fields_updated` should be empty (or contain
+only `notes`).
+
+**Failure modes**
+
+- **`ai_parsed` event with `success: false`:** parse failed.
+  Common causes: invalid `ANTHROPIC_API_KEY` (auth error), the API
+  was overloaded (5xx), or the request timed out (>10s). Check the
+  dev server log for `[lead-parser]` or `[webhook/website-form] AI parse failed`.
+- **No `ai_parsed` event at all:** the webhook didn't fire the
+  parser. Most likely the form `message` was empty — parse is
+  skipped when there's no unstructured text.
+- **`fields_updated` empty when you expected enrichment:** the
+  current row was already populated for those columns. The
+  no-overwrite rule prevented patching. Confirm by checking the
+  raw payload vs the lead row.
+
+**When to re-run this test**
+
+- After any change to `src/lib/parsing/**`.
+- After any change to the webhook handler's parsing path.
+- After rotating the Anthropic API key or switching models.
+- Before each release that ships AI-parsing changes.

@@ -1,0 +1,29 @@
+-- Add 'ai_parsed' to the lead_event_type enum.
+--
+-- Why
+-- ---------------------------------------------------------------
+-- Day 7 introduces an AI parsing layer that runs on every captured
+-- lead and enriches null columns with extracted structured data.
+-- The parse attempt — success or failure — gets logged as a
+-- lead_events row of this new type so the audit trail shows when
+-- AI touched the row, what fields it filled, and what confidence
+-- it attached.
+--
+-- Why a separate event_type and not 'captured'
+-- ---------------------------------------------------------------
+-- 'captured' marks the moment a lead arrived. AI enrichment can
+-- happen seconds later (fire-and-forget) and is a distinct
+-- operation — different surface, different failure modes, different
+-- payload shape. Conflating them would muddy the timeline view
+-- on the dashboard.
+--
+-- Notes
+-- ---------------------------------------------------------------
+-- ALTER TYPE ... ADD VALUE cannot run inside a transaction block,
+-- but the Supabase SQL editor runs each statement in its own
+-- transaction so this is fine. After applying, re-run
+--   pnpm exec supabase gen types typescript --project-id <id> \
+--     --schema public > src/lib/db/types.ts
+-- and re-encode the file from UTF-16 LE (PowerShell default) to UTF-8.
+
+alter type public.lead_event_type add value 'ai_parsed';
