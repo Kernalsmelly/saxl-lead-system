@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same branch when a new commit lands —
+# we only care about the latest state.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Provide placeholder env vars so src/lib/env.ts's Zod parse at
+      # import time doesn't blow up during typecheck. None of these
+      # values are used by tsc or vitest — they just need to be present
+      # and pass the schema's `min(1)` / `.url()` / `.email()` checks.
+      - name: Typecheck
+        run: pnpm typecheck
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://localhost:54321
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-publishable
+          SUPABASE_SECRET_KEY: ci-secret
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+          APP_BASE_URL: http://localhost:3000
+          RESEND_API_KEY: ci-resend
+          NOTIFICATIONS_FROM_EMAIL: notifications@example.com
+          CRON_SECRET: ci-cron-secret-placeholder-32-chars
+          ANTHROPIC_API_KEY: ci-anthropic
+
+      - name: Test
+        run: pnpm test
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://localhost:54321
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-publishable
+          SUPABASE_SECRET_KEY: ci-secret
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+          APP_BASE_URL: http://localhost:3000
+          RESEND_API_KEY: ci-resend
+          NOTIFICATIONS_FROM_EMAIL: notifications@example.com
+          CRON_SECRET: ci-cron-secret-placeholder-32-chars
+          ANTHROPIC_API_KEY: ci-anthropic
+
+      - name: Lint
+        run: pnpm lint
