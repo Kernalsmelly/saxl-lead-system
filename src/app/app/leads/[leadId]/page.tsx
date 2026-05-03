@@ -5,6 +5,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { createClient } from '@/lib/supabase/server';
 import { formatEnum } from '@/lib/format';
 import { StatusForm } from './status-form';
+import { EditableField } from './editable-field';
 
 // Lead detail. Server-rendered, with a single editable control
 // (status) wired up via a server action.
@@ -113,12 +114,49 @@ export default async function LeadDetailPage({
             <Field label="Zip" value={lead.zip} />
           </Section>
 
+          <Section title="Outcome">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <EditableField
+                leadId={lead.id}
+                field="quote_amount"
+                initialValue={lead.quote_amount === null ? null : String(lead.quote_amount)}
+                lastUpdatedAt={lead.last_updated_at}
+                label="Quote amount"
+                placeholder="0.00"
+                variant="number"
+                prefix="$"
+              />
+              <EditableField
+                leadId={lead.id}
+                field="revenue"
+                initialValue={lead.revenue === null ? null : String(lead.revenue)}
+                lastUpdatedAt={lead.last_updated_at}
+                label="Revenue (won jobs)"
+                placeholder="0.00"
+                variant="number"
+                prefix="$"
+              />
+              <EditableField
+                leadId={lead.id}
+                field="job_date"
+                initialValue={lead.job_date}
+                lastUpdatedAt={lead.last_updated_at}
+                label="Job date"
+                variant="date"
+              />
+            </div>
+          </Section>
+
           <Section title="Notes">
-            {lead.notes ? (
-              <p className="whitespace-pre-wrap text-sm">{lead.notes}</p>
-            ) : (
-              <p className="text-sm text-muted-foreground">No notes captured.</p>
-            )}
+            <EditableField
+              leadId={lead.id}
+              field="notes"
+              initialValue={lead.notes}
+              lastUpdatedAt={lead.last_updated_at}
+              label="Notes (visible only to you)"
+              placeholder="Add internal notes about this lead — call summary, special access instructions, gotchas, etc."
+              variant="textarea"
+            />
           </Section>
 
           <Section title="Raw payload">

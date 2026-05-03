@@ -142,3 +142,144 @@ export async function updateLeadStatus(
 
   return { status: 'success', newStatus };
 }
+
+// ---------------------------------------------------------------------
+// Generic field-update action
+// ---------------------------------------------------------------------
+//
+// Used by the lead detail page's editable Notes/Outcome cards. One
+// action handles every editable field via a server-side allowlist —
+// we never trust the client's choice of column. Same stale-write
+// guard pattern as updateLeadStatus.
+
+type EditableField = 'notes' | 'quote_amount' | 'job_date' | 'revenue';
+
+const EDITABLE_FIELDS: readonly EditableField[] = [
+  'notes',
+  'quote_amount',
+  'job_date',
+  'revenue',
+] as const;
+
+export type UpdateFieldState =
+  | { status: 'idle' }
+  | { status: 'success'; field: EditableField }
+  | { status: 'error'; message: string };
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Update a single editable column on a lead.
+ *
+ * Field is taken from the `field` form input and validated against
+ * EDITABLE_FIELDS — the server never trusts the client to nominate
+ * an arbitrary column. Empty-string values become null (lets the
+ * operator clear a field by deleting the input contents).
+ */
+export async function updateLeadField(
+  _prev: UpdateFieldState,
+  formData: FormData,
+): Promise<UpdateFieldState> {
+  const leadId = String(formData.get('lead_id') ?? '');
+  const fieldRaw = String(formData.get('field') ?? '');
+  const valueRaw = formData.get('value');
+  const expectedLastUpdated = String(formData.get('last_updated_at') ?? '');
+
+  if (!UUID_RE.test(leadId)) {
+    return { status: 'error', message: 'Invalid lead id.' };
+  }
+  if (!EDITABLE_FIELDS.includes(fieldRaw as EditableField)) {
+    return { status: 'error', message: 'That field is not editable.' };
+  }
+  const field = fieldRaw as EditableField;
+
+  // Coerce + validate by field type.
+  // Use the generated TablesUpdate shape so column types are checked.
+  const patch: Database['public']['Tables']['leads']['Update'] = {};
+  const rawString = typeof valueRaw === 'string' ? valueRaw.trim() : '';
+
+  switch (field) {
+    case 'notes': {
+      patch.notes = rawString === '' ? null : rawString;
+      // Soft length cap: keep us out of pathological-textarea territory.
+      if (typeof patch.notes === 'string' && patch.notes.length > 10_000) {
+        return { status: 'error', message: 'Notes too long (max 10,000 chars).' };
+      }
+      break;
+    }
+    case 'job_date': {
+      if (rawString === '') {
+        patch.job_date = null;
+      } else if (!ISO_DATE_RE.test(rawString)) {
+        return { status: 'error', message: 'Job date must be YYYY-MM-DD.' };
+      } else {
+        patch.job_date = rawString;
+      }
+      break;
+    }
+    case 'quote_amount':
+    case 'revenue': {
+      if (rawString === '') {
+        patch[field] = null;
+      } else {
+        const n = Number(rawString);
+        if (!Number.isFinite(n) || n < 0) {
+          return {
+            status: 'error',
+            message: `${field === 'quote_amount' ? 'Quote' : 'Revenue'} must be a non-negative number.`,
+          };
+        }
+        // Cap to 2 decimals; we store as numeric in Postgres.
+        patch[field] = Math.round(n * 100) / 100;
+      }
+      break;
+    }
+  }
+
+  const supabase = createClient();
+
+  // Stale-write guard. Read current last_updated_at AND the field's
+  // current value (for the no-op short-circuit).
+  const { data: current, error: readErr } = await supabase
+    .from('leads')
+    .select(`last_updated_at, ${field}`)
+    .eq('id', leadId)
+    .maybeSingle();
+
+  if (readErr) {
+    console.error('[updateLeadField] read failed', { field, readErr });
+    return { status: 'error', message: 'Could not load lead.' };
+  }
+  if (!current) {
+    return { status: 'error', message: 'Lead not found.' };
+  }
+  if (expectedLastUpdated && current.last_updated_at !== expectedLastUpdated) {
+    return {
+      status: 'error',
+      message: 'This lead was updated elsewhere, refresh and try again.',
+    };
+  }
+
+  // No-op short-circuit. Avoids bumping last_updated_at on a save
+  // where nothing actually changed (e.g. user clicks blur without
+  // editing).
+  const currentRow = current as Record<string, unknown>;
+  if (currentRow[field] === patch[field]) {
+    return { status: 'success', field };
+  }
+
+  const { error: updateErr } = await supabase
+    .from('leads')
+    .update(patch)
+    .eq('id', leadId);
+
+  if (updateErr) {
+    console.error('[updateLeadField] update failed', { field, updateErr });
+    return { status: 'error', message: 'Could not save.' };
+  }
+
+  revalidatePath(`/app/leads/${leadId}`);
+  revalidatePath('/app/leads');
+
+  return { status: 'success', field };
+}
