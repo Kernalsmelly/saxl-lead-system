@@ -11,7 +11,13 @@ const serverEnvSchema = z.object({
   RESEND_API_KEY: z.string().min(1),
   NOTIFICATIONS_FROM_EMAIL: z.string().email(),
   CRON_SECRET: z.string().min(16),
-  ANTHROPIC_API_KEY: z.string().min(1),
+  // OpenRouter is OpenAI-API-compatible and proxies many models. We
+  // talk to it through the official `openai` SDK by setting baseURL
+  // and prefixing the model with the provider (e.g.
+  // `anthropic/claude-haiku-4.5`).
+  OPENROUTER_API_KEY: z.string().min(1),
+  OPENROUTER_BASE_URL: z.string().url().default('https://openrouter.ai/api/v1'),
+  OPENROUTER_MODEL: z.string().min(1).default('anthropic/claude-haiku-4.5'),
 });
 
 const clientEnvSchema = serverEnvSchema.pick({
@@ -31,7 +37,9 @@ const source = {
   RESEND_API_KEY: process.env.RESEND_API_KEY,
   NOTIFICATIONS_FROM_EMAIL: process.env.NOTIFICATIONS_FROM_EMAIL,
   CRON_SECRET: process.env.CRON_SECRET,
-  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+  OPENROUTER_BASE_URL: process.env.OPENROUTER_BASE_URL,
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL,
 };
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;

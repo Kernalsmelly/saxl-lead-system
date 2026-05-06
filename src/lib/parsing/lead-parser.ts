@@ -1,5 +1,5 @@
 import 'server-only';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
 import { env } from '@/lib/env';
 
@@ -9,28 +9,34 @@ import { env } from '@/lib/env';
 // In later sessions the same parser will run over Meta DM bodies
 // and SMS transcripts.
 //
+// Provider: OpenRouter via the OpenAI-compatible /v1/chat/completions
+// endpoint. The official `openai` SDK is pointed at OpenRouter's base
+// URL and given an OpenRouter API key — Anthropic models, OpenAI
+// models, Gemini, etc. all reachable through one wire format.
+//
 // Design choices
 // ---------------------------------------------------------------
-//   - Tool use, not raw JSON. We define a tool whose input_schema
-//     matches the desired output shape and force Claude to call it.
-//     The model can't return free prose; we just read the tool input.
-//   - Haiku 4.5 — fast and cheap; structured extraction doesn't
-//     need Opus-class reasoning.
+//   - Function calling for structured output, not raw JSON parsing.
+//     We define a function whose parameters JSON Schema matches the
+//     desired output shape and force tool_choice to it. The model
+//     can't return free prose; we just read the function arguments.
+//   - Default model is Haiku 4.5 via OpenRouter (anthropic/
+//     claude-haiku-4.5). Configurable via OPENROUTER_MODEL.
 //   - Pure-by-design failure modes: never throws. Every code path
-//     funnels into { success: false, error } so the webhook handler
-//     can audit the result without try/catching the parser.
-//   - Defensive parsing: every field in the tool's response is
-//     treated as potentially missing or wrong-shape. Invalid values
-//     fall back to null rather than throw.
+//     funnels into { success: false, error }.
+//   - Defensive parsing: arguments come back as a JSON STRING from
+//     the OpenAI surface (unlike Anthropic's structured tool_use
+//     blocks), so the JSON.parse step is wrapped in try/catch and
+//     the result run through coerceParsedLead — every field is
+//     treated as potentially missing or wrong-shape.
 //   - Hard 10-second timeout via the SDK's `timeout` option.
 //   - Hard 4000-character cap on input. Anything longer is
-//     truncated; we log a warning so we can spot drift if it starts
-//     happening regularly.
+//     truncated with a warning so we can spot drift.
 
-const MODEL = 'claude-haiku-4-5-20251001';
 const MAX_INPUT_CHARS = 4000;
 const TIMEOUT_MS = 10_000;
 const MAX_TOKENS = 1024;
+const TOOL_NAME = 'extract_lead_fields';
 
 export type ChannelHint = 'website_form' | 'instagram_dm' | 'facebook_dm' | 'sms';
 
@@ -60,7 +66,7 @@ const SYSTEM_PROMPT = [
   'You extract structured lead data from unstructured text submitted to small service businesses (hauling, junk removal, moving, pressure washing, landscaping, cleaning, demolition).',
   '',
   'Hard rules:',
-  '- Respond ONLY by calling the extract_lead_fields tool. Never write prose.',
+  `- Respond ONLY by calling the ${TOOL_NAME} tool. Never write prose.`,
   '- For each field: extract verbatim only if the value is clearly stated in the text. Otherwise output null.',
   '- Never invent or guess. "Probably means..." is not extraction.',
   '- service_type values use snake_case from this set when they fit: junk_removal, moving, pressure_washing, landscaping, cleaning, demolition, hauling, other. Pick the most specific match. If none fit, emit null.',
@@ -73,56 +79,71 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 const LEAD_EXTRACTION_TOOL = {
-  name: 'extract_lead_fields',
-  description:
-    'Record the structured lead data extracted from the prospect text. Always call this tool exactly once.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      name: { type: ['string', 'null'], description: "The prospect's full name, or null if not stated." },
-      phone: { type: ['string', 'null'], description: 'Phone number as written in the source text.' },
-      email: { type: ['string', 'null'], description: 'Email address.' },
-      service_type: {
-        type: ['string', 'null'],
-        description:
-          'Snake_case service category. Prefer one of: junk_removal, moving, pressure_washing, landscaping, cleaning, demolition, hauling, other.',
+  type: 'function' as const,
+  function: {
+    name: TOOL_NAME,
+    description:
+      'Record the structured lead data extracted from the prospect text. Always call this tool exactly once.',
+    parameters: {
+      type: 'object' as const,
+      properties: {
+        name: { type: ['string', 'null'], description: "The prospect's full name, or null if not stated." },
+        phone: { type: ['string', 'null'], description: 'Phone number as written in the source text.' },
+        email: { type: ['string', 'null'], description: 'Email address.' },
+        service_type: {
+          type: ['string', 'null'],
+          description:
+            'Snake_case service category. Prefer one of: junk_removal, moving, pressure_washing, landscaping, cleaning, demolition, hauling, other.',
+        },
+        city: { type: ['string', 'null'] },
+        zip: { type: ['string', 'null'] },
+        address: { type: ['string', 'null'] },
+        preferred_date: {
+          type: ['string', 'null'],
+          description: 'ISO 8601 date (YYYY-MM-DD) only if an unambiguous calendar date is stated.',
+        },
+        notes: {
+          type: ['string', 'null'],
+          description: '1-2 sentence summary of the prospect intent. Concrete and specific.',
+        },
+        parsed_confidence: {
+          type: 'number',
+          minimum: 0,
+          maximum: 1,
+          description: 'Confidence in the extractions, 0.0-1.0.',
+        },
       },
-      city: { type: ['string', 'null'] },
-      zip: { type: ['string', 'null'] },
-      address: { type: ['string', 'null'] },
-      preferred_date: {
-        type: ['string', 'null'],
-        description: 'ISO 8601 date (YYYY-MM-DD) only if an unambiguous calendar date is stated.',
-      },
-      notes: {
-        type: ['string', 'null'],
-        description: '1-2 sentence summary of the prospect intent. Concrete and specific.',
-      },
-      parsed_confidence: {
-        type: 'number',
-        minimum: 0,
-        maximum: 1,
-        description: 'Confidence in the extractions, 0.0-1.0.',
-      },
+      required: [
+        'name',
+        'phone',
+        'email',
+        'service_type',
+        'city',
+        'zip',
+        'address',
+        'preferred_date',
+        'notes',
+        'parsed_confidence',
+      ],
     },
-    required: [
-      'name',
-      'phone',
-      'email',
-      'service_type',
-      'city',
-      'zip',
-      'address',
-      'preferred_date',
-      'notes',
-      'parsed_confidence',
-    ],
   },
 };
 
-let _client: Anthropic | null = null;
-function client(): Anthropic {
-  if (!_client) _client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+let _client: OpenAI | null = null;
+function client(): OpenAI {
+  if (!_client) {
+    _client = new OpenAI({
+      apiKey: env.OPENROUTER_API_KEY,
+      baseURL: env.OPENROUTER_BASE_URL,
+      // OpenRouter recommends an HTTP-Referer + X-Title header so they
+      // can attribute traffic to your project on their dashboard. Both
+      // are optional; we set generic values here.
+      defaultHeaders: {
+        'HTTP-Referer': 'https://github.com/Kernalsmelly/saxl-lead-system',
+        'X-Title': 'Saxl Lead System',
+      },
+    });
+  }
   return _client;
 }
 
@@ -136,7 +157,6 @@ export async function parseLead(input: ParseLeadInput): Promise<ParseResult> {
     return { success: false, error: 'rawText is empty' };
   }
 
-  // Truncate long inputs. Log a warning so we can spot drift.
   let text = trimmed;
   if (text.length > MAX_INPUT_CHARS) {
     console.warn('[lead-parser] truncating rawText', {
@@ -150,17 +170,19 @@ export async function parseLead(input: ParseLeadInput): Promise<ParseResult> {
     ? `Channel: ${input.channelHint}\n\nText:\n${text}`
     : text;
 
-  let response: Anthropic.Message;
+  let response: OpenAI.Chat.Completions.ChatCompletion;
   try {
-    response = await client().messages.create(
+    response = await client().chat.completions.create(
       {
-        model: MODEL,
+        model: env.OPENROUTER_MODEL,
         max_tokens: MAX_TOKENS,
         temperature: 0,
-        system: SYSTEM_PROMPT,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ],
         tools: [LEAD_EXTRACTION_TOOL],
-        tool_choice: { type: 'tool', name: 'extract_lead_fields' },
-        messages: [{ role: 'user', content: userContent }],
+        tool_choice: { type: 'function', function: { name: TOOL_NAME } },
       },
       { timeout: TIMEOUT_MS },
     );
@@ -171,28 +193,43 @@ export async function parseLead(input: ParseLeadInput): Promise<ParseResult> {
     };
   }
 
-  // Find the tool_use block. Defensive: if Claude somehow returned text
-  // instead, or the block shape is wrong, treat as parse failure.
-  const toolUseBlock = response.content.find(
-    (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'extract_lead_fields',
-  );
-  if (!toolUseBlock) {
+  // Locate the tool call. Defensive: any provider quirk that causes
+  // a missing or wrong-named tool call falls into the failure path.
+  const choice = response.choices?.[0];
+  const toolCall = choice?.message?.tool_calls?.[0];
+  if (
+    !toolCall ||
+    toolCall.type !== 'function' ||
+    toolCall.function?.name !== TOOL_NAME
+  ) {
     return {
       success: false,
-      error: `model did not call extract_lead_fields (stop_reason=${response.stop_reason})`,
+      error: `model did not call ${TOOL_NAME} (finish_reason=${choice?.finish_reason ?? 'unknown'})`,
     };
   }
 
-  const parsed = coerceParsedLead(toolUseBlock.input);
+  // OpenAI/OpenRouter returns function arguments as a JSON string.
+  // Wrap parse in try/catch — we've seen models occasionally emit
+  // trailing commas or unquoted keys despite schema constraints.
+  let argsJson: unknown;
+  try {
+    argsJson = JSON.parse(toolCall.function.arguments ?? '{}');
+  } catch (err) {
+    return {
+      success: false,
+      error: `tool arguments not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const parsed = coerceParsedLead(argsJson);
   return { success: true, parsed };
 }
 
 /**
- * Defensive coercion of the tool_use input into a ParsedLead.
+ * Defensive coercion of tool arguments into a ParsedLead.
  *
- * The schema was sent to Claude, but we don't trust the output to
- * match. Each field is checked individually and falls back to null
- * if missing or wrong-shape. Confidence is clamped to [0, 1] and
+ * Each field is checked individually and falls back to null if
+ * missing or wrong-shape. Confidence is clamped to [0, 1] and
  * defaults to 0 if missing or invalid.
  */
 function coerceParsedLead(input: unknown): ParsedLead {
@@ -216,8 +253,6 @@ function stringOrNull(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const trimmed = v.trim();
   if (!trimmed) return null;
-  // Some models occasionally output the literal string "null" instead of
-  // a JSON null. Treat those as null too.
   if (trimmed.toLowerCase() === 'null') return null;
   return trimmed;
 }
@@ -235,6 +270,6 @@ export const __test = {
   LEAD_EXTRACTION_TOOL,
   MAX_INPUT_CHARS,
   TIMEOUT_MS,
-  MODEL,
+  TOOL_NAME,
   coerceParsedLead,
 };

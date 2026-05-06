@@ -13,7 +13,6 @@
     "sign-webhook": "tsx scripts/sign-webhook.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.91.1",
     "@radix-ui/react-slot": "^1.2.4",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.1",
@@ -23,6 +22,7 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^1.9.0",
     "next": "14.2.35",
+    "openai": "^6.36.0",
     "react": "^18",
     "react-dom": "^18",
     "resend": "^6.12.2",
